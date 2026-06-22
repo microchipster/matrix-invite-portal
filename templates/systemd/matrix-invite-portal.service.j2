@@ -1,0 +1,53 @@
+#jinja2: lstrip_blocks: True
+[Unit]
+Description={{ matrix_invite_portal_ansible_name }}
+{% for service in matrix_invite_portal_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+{% for service in matrix_invite_portal_systemd_wanted_services_list %}
+Wants={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStartPre=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ devture_systemd_docker_base_container_stop_grace_time_seconds }} {{ matrix_invite_portal_container_name }} 2>/dev/null || true'
+ExecStartPre=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ matrix_invite_portal_container_name }} 2>/dev/null || true'
+
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
+			--rm \
+			--name={{ matrix_invite_portal_container_name }} \
+			--log-driver=none \
+			--user={{ matrix_user_uid }}:{{ matrix_user_gid }} \
+			--cap-drop=ALL \
+			--read-only \
+			--tmpfs /tmp \
+			--tmpfs /run \
+			--network={{ matrix_invite_portal_container_network }} \
+			{% if matrix_invite_portal_container_http_host_bind_port %}
+			-p {{ matrix_invite_portal_container_http_host_bind_port }}:{{ matrix_invite_portal_container_port }} \
+			{% endif %}
+			--env-file={{ matrix_invite_portal_config_env_file }} \
+			--label-file={{ matrix_invite_portal_base_path }}/labels \
+			--mount type=bind,src={{ matrix_invite_portal_data_path }},dst=/data \
+			{% for arg in matrix_invite_portal_container_extra_arguments %}
+			{{ arg }} \
+			{% endfor %}
+			{{ matrix_invite_portal_container_image }}
+
+{% for network in matrix_invite_portal_container_additional_networks %}
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} network connect {{ network }} {{ matrix_invite_portal_container_name }}
+{% endfor %}
+
+ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ matrix_invite_portal_container_name }}
+
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ devture_systemd_docker_base_container_stop_grace_time_seconds }} {{ matrix_invite_portal_container_name }} 2>/dev/null || true'
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ matrix_invite_portal_container_name }} 2>/dev/null || true'
+Restart=always
+RestartSec=30
+SyslogIdentifier={{ matrix_invite_portal_systemd_service_basename }}
+
+[Install]
+WantedBy=multi-user.target

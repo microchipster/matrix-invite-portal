@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 MDAD project contributors
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# Matrix Invite Portal - closed-registration onboarding portal for Matrix
+
+matrix_invite_portal_ansible_name: "Matrix Invite Portal"
+
+# Keep the role opt-in. The portal needs an explicit hostname, a portal admin token, and a Synapse registration shared secret.
+matrix_invite_portal_enabled: false
+
+matrix_invite_portal_identifier: matrix-invite-portal
+
+# This role is built from its standalone git repository.
+matrix_invite_portal_container_image_self_build: true
+matrix_invite_portal_container_image_self_build_repo: "https://github.com/microchipster/matrix-invite-portal.git"
+# Defaults to `main`, but you can override it with a branch, tag, or commit SHA.
+matrix_invite_portal_container_image_self_build_repo_version: main
+matrix_invite_portal_container_image: "localhost/matrix-invite-portal:latest"
+
+# Paths
+matrix_invite_portal_base_path: "{{ matrix_base_data_path }}/invite-portal"
+matrix_invite_portal_config_path: "{{ matrix_invite_portal_base_path }}/config"
+matrix_invite_portal_config_env_file: "{{ matrix_invite_portal_config_path }}/.env"
+matrix_invite_portal_data_path: "{{ matrix_invite_portal_base_path }}/data"
+matrix_invite_portal_database_path: "/data/invite-portal.sqlite3"
+matrix_invite_portal_container_src_files_path: "{{ matrix_invite_portal_base_path }}/docker-src"
+
+# Docker
+matrix_invite_portal_container_network: "{{ matrix_invite_portal_identifier }}"
+matrix_invite_portal_container_additional_networks: >-
+  {{
+    ([matrix_playbook_reverse_proxyable_services_additional_network] if matrix_playbook_reverse_proxyable_services_additional_network else [])
+    + ([matrix_synapse_container_network] if matrix_synapse_container_network and matrix_synapse_container_network != 'host' and matrix_synapse_container_network != matrix_playbook_reverse_proxyable_services_additional_network else [])
+  }}
+matrix_invite_portal_container_name: "{{ matrix_invite_portal_identifier }}"
+matrix_invite_portal_container_port: 3000
+matrix_invite_portal_container_http_host_bind_port: ""
+matrix_invite_portal_container_extra_arguments: []
+
+# Reverse proxy / Traefik
+matrix_invite_portal_container_labels_traefik_enabled: true
+matrix_invite_portal_container_labels_traefik_docker_network: "{{ matrix_playbook_reverse_proxyable_services_additional_network }}"
+matrix_invite_portal_container_labels_traefik_hostname: "{{ matrix_server_fqn_matrix }}"
+matrix_invite_portal_container_labels_traefik_entrypoints: web-secure
+matrix_invite_portal_container_labels_traefik_tls_certResolver: default # noqa var-naming
+matrix_invite_portal_container_labels_additional_labels: ""
+
+# Portal text
+matrix_invite_portal_portal_title: "🤝 Join our community"
+matrix_invite_portal_portal_success_message: "✨ You’re in."
+matrix_invite_portal_portal_failure_message: "We could not create the account. Please try again or ask the person who sent you this link."
+matrix_invite_portal_portal_root_message: "Open the invite link you were sent to continue."
+
+# Login/onboarding links shown after registration.
+matrix_invite_portal_homeserver_url: "{{ matrix_homeserver_url }}"
+# The portal talks directly to Synapse over the private Docker network.
+matrix_invite_portal_synapse_admin_api_base_url: "http://matrix-synapse:{{ matrix_synapse_container_client_api_port }}/_synapse/admin"
+# Use the Synapse registration shared secret for user provisioning.
+# Rotating this requires changing the playbook variable and rerunning the playbook.
+matrix_invite_portal_synapse_registration_shared_secret: "{{ matrix_synapse_registration_shared_secret }}"
+# Separate admin token used when the portal creates password reset links.
+matrix_invite_portal_synapse_admin_access_token: ""
+matrix_invite_portal_info_website_url: "https://some.domain.wiki/matrix-help"
+
+# Provisioning adapter
+matrix_invite_portal_provisioning_timeout_seconds: 60
+matrix_invite_portal_provisioning_claim_timeout_seconds: 900
+matrix_invite_portal_default_invite_ttl_hours: 8760
+matrix_invite_portal_default_use_limit: 1
+# Default lifetime for one-time password reset links.
+matrix_invite_portal_default_password_reset_ttl_hours: 24
+
+# Admin API authentication for the portal's invite-management endpoints.
+# Generate this yourself, for example with `pwgen -s 64 1`.
+matrix_invite_portal_admin_token: ""
+
+# Optional base URL for returned invite links.
+# By default, the playbook derives absolute invite URLs from the configured Traefik hostname.
+matrix_invite_portal_public_base_url: >-
+  {{ 'https://' + matrix_invite_portal_container_labels_traefik_hostname if matrix_invite_portal_container_labels_traefik_hostname else '' }}
+
+# Systemd
+matrix_invite_portal_systemd_required_services_list: "{{ [devture_systemd_docker_base_docker_service_name] if devture_systemd_docker_base_docker_service_name else [] }}"
+matrix_invite_portal_systemd_wanted_services_list: []
+matrix_invite_portal_systemd_service_basename: "matrix-invite-portal"
+matrix_invite_portal_systemd_service_name: "{{ matrix_invite_portal_systemd_service_basename }}.service"
+
+# Restart control
+matrix_invite_portal_restart_necessary: false

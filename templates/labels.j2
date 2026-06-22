@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 MDAD project contributors
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+{% if matrix_invite_portal_container_labels_traefik_enabled %}
+traefik.enable=true
+
+{% if matrix_invite_portal_container_labels_traefik_docker_network %}
+traefik.docker.network={{ matrix_invite_portal_container_labels_traefik_docker_network }}
+{% endif %}
+
+traefik.http.services.{{ matrix_invite_portal_identifier }}.loadbalancer.server.port={{ matrix_invite_portal_container_port }}
+traefik.http.routers.{{ matrix_invite_portal_identifier }}.rule=Host(`{{ matrix_invite_portal_container_labels_traefik_hostname }}`) && (PathPrefix(`/invite`) || PathPrefix(`/reset`) || PathPrefix(`/admin`) || Path(`/health`))
+traefik.http.routers.{{ matrix_invite_portal_identifier }}.service={{ matrix_invite_portal_identifier }}
+traefik.http.routers.{{ matrix_invite_portal_identifier }}.entrypoints={{ matrix_invite_portal_container_labels_traefik_entrypoints }}
+traefik.http.routers.{{ matrix_invite_portal_identifier }}.tls=true
+traefik.http.routers.{{ matrix_invite_portal_identifier }}.tls.certResolver={{ matrix_invite_portal_container_labels_traefik_tls_certResolver }}
+
+{% endif %}
+
+{{ matrix_invite_portal_container_labels_additional_labels }}

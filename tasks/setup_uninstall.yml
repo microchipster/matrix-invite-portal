@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 MDAD project contributors
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Check existence of Matrix Invite Portal systemd service
+  ansible.builtin.stat:
+    path: "{{ devture_systemd_docker_base_systemd_path }}/{{ matrix_invite_portal_systemd_service_name }}"
+  register: matrix_invite_portal_service_stat
+
+- when: matrix_invite_portal_service_stat.stat.exists | bool
+  block:
+    - name: Ensure Matrix Invite Portal is stopped
+      ansible.builtin.service:
+        name: "{{ matrix_invite_portal_systemd_service_basename }}"
+        state: stopped
+        enabled: false
+        daemon_reload: true
+
+    - name: Ensure Matrix Invite Portal systemd service doesn't exist
+      ansible.builtin.file:
+        path: "{{ devture_systemd_docker_base_systemd_path }}/{{ matrix_invite_portal_systemd_service_name }}"
+        state: absent
+
+    - name: Ensure systemd reloads after Matrix Invite Portal service removal
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+- name: Ensure Matrix Invite Portal container doesn't exist
+  community.docker.docker_container:
+    name: "{{ matrix_invite_portal_container_name }}"
+    state: absent
+
+- name: Ensure Matrix Invite Portal image doesn't exist
+  community.docker.docker_image:
+    name: "{{ matrix_invite_portal_container_image }}"
+    state: absent
+    force_absent: true
+
+- name: Ensure Matrix Invite Portal source files don't exist
+  ansible.builtin.file:
+    path: "{{ matrix_invite_portal_container_src_files_path }}"
+    state: absent
+
+- name: Ensure Matrix Invite Portal paths don't exist
+  ansible.builtin.file:
+    path: "{{ matrix_invite_portal_base_path }}"
+    state: absent
