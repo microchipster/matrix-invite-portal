@@ -33,6 +33,11 @@
     name: "{{ matrix_invite_portal_container_name }}"
     state: absent
 
+- name: Ensure Matrix Invite Portal container network doesn't exist
+  community.general.docker_network:
+    name: "{{ matrix_invite_portal_container_network }}"
+    state: absent
+
 - name: Ensure Matrix Invite Portal image doesn't exist
   community.docker.docker_image:
     name: "{{ matrix_invite_portal_container_image }}"

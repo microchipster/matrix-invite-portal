@@ -16,8 +16,14 @@
     - {path: "{{ matrix_invite_portal_base_path }}", when: true}
     - {path: "{{ matrix_invite_portal_config_path }}", when: true}
     - {path: "{{ matrix_invite_portal_data_path }}", when: true}
-    - {path: "{{ matrix_invite_portal_container_src_files_path }}", when: "{{ matrix_invite_portal_container_image_self_build }}"}
   when: "item.when | bool"
+
+- name: Ensure Matrix Invite Portal source checkout starts clean on self-build
+  # This directory is only a disposable git checkout for building the image.
+  ansible.builtin.file:
+    path: "{{ matrix_invite_portal_container_src_files_path }}"
+    state: absent
+  when: "matrix_invite_portal_container_image_self_build | bool"
 
 - name: Ensure Matrix Invite Portal image is pulled
   community.docker.docker_image_pull:
