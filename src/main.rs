@@ -97,9 +97,6 @@ struct InviteRecord {
     claimed_by: Option<String>,
     redeemed_at: Option<i64>,
     redeemed_by: Option<String>,
-    summary_username: Option<String>,
-    summary_password: Option<String>,
-    summary_saved_at: Option<i64>,
     last_failure_reason: Option<String>,
     last_failure_at: Option<i64>,
 }
@@ -114,7 +111,6 @@ struct RedeemForm {
 #[derive(Debug, Deserialize)]
 struct InvitePageQuery {
     step: Option<String>,
-    fresh: Option<String>,
     clear: Option<String>,
 }
 
@@ -298,9 +294,6 @@ fn init_database(path: &Path) -> Result<(), AppError> {
             claimed_by TEXT,
             redeemed_at INTEGER,
             redeemed_by TEXT,
-            summary_username TEXT,
-            summary_password TEXT,
-            summary_saved_at INTEGER,
             last_failure_reason TEXT,
             last_failure_at INTEGER
         );
@@ -329,8 +322,6 @@ fn init_database(path: &Path) -> Result<(), AppError> {
             claimed_by TEXT,
             redeemed_at INTEGER,
             redeemed_by TEXT,
-            summary_password TEXT,
-            summary_saved_at INTEGER,
             logout_devices INTEGER NOT NULL DEFAULT 0,
             last_failure_reason TEXT,
             last_failure_at INTEGER
@@ -349,20 +340,20 @@ fn migrate_invites_schema(conn: &Connection) -> Result<(), AppError> {
         conn.execute("ALTER TABLE invites ADD COLUMN invite_id TEXT", [])?;
     }
 
-    if !column_exists(conn, "invites", "summary_username")? {
-        conn.execute("ALTER TABLE invites ADD COLUMN summary_username TEXT", [])?;
-    }
-
-    if !column_exists(conn, "invites", "summary_password")? {
-        conn.execute("ALTER TABLE invites ADD COLUMN summary_password TEXT", [])?;
-    }
-
-    if !column_exists(conn, "invites", "summary_saved_at")? {
-        conn.execute("ALTER TABLE invites ADD COLUMN summary_saved_at INTEGER", [])?;
-    }
-
     if !column_exists(conn, "invite_events", "invite_id")? {
         conn.execute("ALTER TABLE invite_events ADD COLUMN invite_id TEXT", [])?;
+    }
+
+    if column_exists(conn, "invites", "summary_username")? {
+        conn.execute(
+            r#"
+            UPDATE invites
+            SET summary_username = NULL,
+                summary_password = NULL,
+                summary_saved_at = NULL
+            "#,
+            [],
+        )?;
     }
 
     conn.execute(
@@ -954,36 +945,6 @@ fn summary_storage_key(token: &str) -> String {
     format!("matrix-invite-portal.summary.{}", token)
 }
 
-const SUMMARY_STATE_TTL_SECONDS: i64 = 48 * 60 * 60;
-
-fn invite_summary_snapshot(invite: &InviteRecord, now: i64) -> Option<(String, String, i64)> {
-    let saved_at = invite.summary_saved_at?;
-    if saved_at + SUMMARY_STATE_TTL_SECONDS < now {
-        return None;
-    }
-
-    Some((
-        invite.summary_username.clone()?,
-        invite.summary_password.clone()?,
-        saved_at,
-    ))
-}
-
-fn clear_invite_summary_snapshot(database_path: &Path, token: &str) -> Result<(), AppError> {
-    let conn = open_connection(database_path)?;
-    conn.execute(
-        r#"
-        UPDATE invites
-        SET summary_username = NULL,
-            summary_password = NULL,
-            summary_saved_at = NULL
-        WHERE token_hash = ?1
-        "#,
-        params![hash_token(token)],
-    )?;
-    Ok(())
-}
-
 fn clear_summary_state_page(token: &str) -> String {
     format!(
         r#"
@@ -1168,10 +1129,6 @@ fn summary_state_script(token: &str) -> String {
     const draftKey = 'matrix-invite-portal.draft.' + block.dataset.summaryToken;
     const mode = block.dataset.summaryMode;
     const token = block.dataset.summaryToken;
-    const summaryUrl = '/invite/' + token + '?step=summary';
-    const serverUsername = block.dataset.summaryUsername || '';
-    const serverPassword = block.dataset.summaryPassword || '';
-    const serverSavedAt = Number(block.dataset.summarySavedAt) || 0;
     const usernameField = block.querySelector('[data-summary-field="username"]');
     const passwordField = block.querySelector('[data-summary-field="password"]');
     const resetLink = block.querySelector('[data-reset-invite-state]');
@@ -1196,15 +1153,6 @@ fn summary_state_script(token: &str) -> String {
     }};
 
     const readSnapshot = () => {{
-      if (serverUsername && serverPassword) {{
-        return {{
-          token,
-          username: serverUsername,
-          password: serverPassword,
-          saved_at: serverSavedAt || Date.now(),
-        }};
-      }}
-
       const state =
         parseSnapshot(window.localStorage.getItem(key)) ||
         parseSnapshot(window.name) ||
@@ -1223,18 +1171,12 @@ fn summary_state_script(token: &str) -> String {
     const persistSnapshot = (data) => {{
       window.localStorage.setItem(key, JSON.stringify(data));
       window.name = JSON.stringify(data);
-      try {{
-        window.history.replaceState({{ matrixInvitePortalSummary: data }}, '', summaryUrl);
-      }} catch (_) {{}}
     }};
 
     const clearSnapshot = () => {{
       window.localStorage.removeItem(key);
       window.localStorage.removeItem(draftKey);
       window.name = '';
-      try {{
-        window.history.replaceState(null, '', summaryUrl);
-      }} catch (_) {{}}
     }};
 
     const restoreSummary = () => {{
@@ -1246,18 +1188,6 @@ fn summary_state_script(token: &str) -> String {
       return true;
     }};
 
-    const redirectToIntro = () => {{
-      if (window.localStorage.getItem(key) || window.name || window.history.state) {{
-        clearSnapshot();
-      }}
-      window.location.replace('/invite/' + token);
-    }};
-
-    const retryRestoreOrRedirect = () => {{
-      if (restoreSummary()) return;
-      redirectToIntro();
-    }};
-
     try {{
       if (mode === 'save') {{
         const payload = {{
@@ -1267,22 +1197,12 @@ fn summary_state_script(token: &str) -> String {
           saved_at: Number(block.dataset.summarySavedAt) || Date.now(),
         }};
         persistSnapshot(payload);
-        window.history.replaceState({{ matrixInvitePortalSummary: payload }}, '', summaryUrl);
+        writeState(payload);
       }} else {{
-        if (!restoreSummary()) {{
-          const restoreTimer = window.setTimeout(retryRestoreOrRedirect, 75);
-          window.addEventListener('pageshow', () => {{
-            window.clearTimeout(restoreTimer);
-            retryRestoreOrRedirect();
-          }}, {{ once: true }});
-          return;
-        }}
+        restoreSummary();
       }}
     }} catch (_) {{
-      if (mode !== 'save') {{
-        redirectToIntro();
-        return;
-      }}
+      return;
     }}
 
     if (resetLink) {{
@@ -1300,6 +1220,12 @@ fn summary_state_script(token: &str) -> String {
         }} catch (_) {{}}
       }});
     }}
+
+    window.addEventListener('pageshow', () => {{
+      try {{
+        restoreSummary();
+      }} catch (_) {{}}
+    }});
   }})();
 </script>
 "#,
@@ -1406,9 +1332,7 @@ async fn show_invite(
     let status = load_invite_status(&state.config.database_path, &token);
     let show_form = query.step.as_deref() == Some("form");
     let show_summary = query.step.as_deref() == Some("summary");
-    let fresh_requested = query.fresh.as_deref() == Some("1");
     let wants_clear = query.clear.as_deref() == Some("1");
-    let now = now_ts();
     match status {
         Ok(Some(invite)) if invite.revoked_at.is_some() => html_error(
             StatusCode::GONE,
@@ -1430,7 +1354,6 @@ async fn show_invite(
         ),
         Ok(Some(invite)) => {
             let invite_used = invite.use_limit > 0 && invite.use_count >= invite.use_limit;
-            let completion_snapshot = invite_summary_snapshot(&invite, now);
             let message = if let Some(reason) = invite.last_failure_reason.as_ref() {
                 format!(
                     r#"<div class="notice error">{}</div>"#,
@@ -1441,52 +1364,11 @@ async fn show_invite(
             };
 
             if wants_clear {
-                if let Err(err) = clear_invite_summary_snapshot(&state.config.database_path, &token)
-                {
-                    return html_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &state.config.portal_title,
-                        &format!(
-                            r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div></div>"#,
-                            encode_minimal(&state.config.portal_title),
-                            encode_minimal(&err.to_string()),
-                        ),
-                    );
-                }
-
                 return page(&state.config.portal_title, &clear_summary_state_page(&token))
                     .into_response();
             }
 
-            if let Some((username, password, saved_at)) = completion_snapshot.as_ref() {
-                if !fresh_requested {
-                    return page(
-                        &state.config.portal_title,
-                        &format!(
-                            r#"
-<div class="card">
-  <h1>{}</h1>
-  <div class="notice success">{}</div>
-  {}
-</div>
-{}"#,
-                            encode_minimal(&state.config.portal_title),
-                            encode_minimal(&state.config.portal_success_message),
-                            onboarding_summary(
-                                &state.config,
-                                &token,
-                                Some(username.as_str()),
-                                Some(password.as_str()),
-                                Some(*saved_at),
-                            ),
-                            summary_state_script(&token),
-                        ),
-                    )
-                    .into_response();
-                }
-            }
-
-            if show_summary {
+            if show_summary || invite_used {
                 page(
                     &state.config.portal_title,
                     &format!(
@@ -1743,7 +1625,7 @@ fn load_invite_status(database_path: &Path, token: &str) -> Result<Option<Invite
             r#"
             SELECT invite_id, token_preview, created_at, expires_at, created_by, use_limit, use_count,
                    revoked_at, claimed_at, claimed_until, claimed_by, redeemed_at, redeemed_by,
-                   summary_username, summary_password, summary_saved_at, last_failure_reason, last_failure_at
+                   last_failure_reason, last_failure_at
             FROM invites
             WHERE token_hash = ?1
             "#,
@@ -1763,11 +1645,8 @@ fn load_invite_status(database_path: &Path, token: &str) -> Result<Option<Invite
                     claimed_by: row.get(10)?,
                     redeemed_at: row.get(11)?,
                     redeemed_by: row.get(12)?,
-                    summary_username: row.get(13)?,
-                    summary_password: row.get(14)?,
-                    summary_saved_at: row.get(15)?,
-                    last_failure_reason: row.get(16)?,
-                    last_failure_at: row.get(17)?,
+                    last_failure_reason: row.get(13)?,
+                    last_failure_at: row.get(14)?,
                 })
             },
         )
@@ -1800,13 +1679,11 @@ fn create_invite_record(
         INSERT INTO invites (
             invite_id, token_hash, token_preview, created_at, expires_at, created_by, note,
             use_limit, use_count, revoked_at, claimed_at, claimed_until, claimed_by,
-            redeemed_at, redeemed_by, summary_username, summary_password, summary_saved_at,
-            last_failure_reason, last_failure_at
+            redeemed_at, redeemed_by, last_failure_reason, last_failure_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, 0, NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, NULL,
-            NULL, NULL
+            NULL, NULL, NULL, NULL
         )
         "#,
         params![
@@ -1847,7 +1724,7 @@ fn list_invites_records(database_path: &Path) -> Result<Vec<InviteRecord>, AppEr
         r#"
         SELECT invite_id, token_preview, created_at, expires_at, created_by, use_limit, use_count,
                revoked_at, claimed_at, claimed_until, claimed_by, redeemed_at, redeemed_by,
-               summary_username, summary_password, summary_saved_at, last_failure_reason, last_failure_at
+               last_failure_reason, last_failure_at
         FROM invites
         ORDER BY created_at DESC
         LIMIT 100
@@ -1869,11 +1746,8 @@ fn list_invites_records(database_path: &Path) -> Result<Vec<InviteRecord>, AppEr
             claimed_by: row.get(10)?,
             redeemed_at: row.get(11)?,
             redeemed_by: row.get(12)?,
-            summary_username: row.get(13)?,
-            summary_password: row.get(14)?,
-            summary_saved_at: row.get(15)?,
-            last_failure_reason: row.get(16)?,
-            last_failure_at: row.get(17)?,
+            last_failure_reason: row.get(13)?,
+            last_failure_at: row.get(14)?,
         })
     })?;
 
@@ -2187,9 +2061,6 @@ async fn redeem_token(
         SET use_count = use_count + 1,
             redeemed_at = ?2,
             redeemed_by = ?3,
-            summary_username = ?4,
-            summary_password = ?5,
-            summary_saved_at = ?6,
             claimed_at = NULL,
             claimed_until = NULL,
             claimed_by = NULL,
@@ -2197,7 +2068,7 @@ async fn redeem_token(
             last_failure_at = NULL
         WHERE token_hash = ?1
         "#,
-        params![token_hash, now, username, username, password, now],
+        params![token_hash, now, username],
     )?;
     record_event_tx(
         &tx,

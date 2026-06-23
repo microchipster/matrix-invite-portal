@@ -24,8 +24,6 @@ struct PasswordResetRecord {
     expires_at: i64,
     user_id: String,
     redeemed_at: Option<i64>,
-    summary_password: Option<String>,
-    summary_saved_at: Option<i64>,
     logout_devices: i64,
 }
 
@@ -63,13 +61,6 @@ pub(crate) struct PasswordResetPageQuery {
 #[derive(Debug, Serialize)]
 struct SynapseResetPasswordRequest<'a> {
     new_password: &'a str,
-    logout_devices: bool,
-}
-
-#[derive(Debug)]
-struct PasswordResetSnapshot<'a> {
-    password: &'a str,
-    saved_at: i64,
     logout_devices: bool,
 }
 
@@ -128,12 +119,10 @@ pub(crate) async fn create_password_reset(
             claimed_by,
             redeemed_at,
             redeemed_by,
-            summary_password,
-            summary_saved_at,
             logout_devices,
             last_failure_reason,
             last_failure_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL)
         "#,
         params![
             reset_id,
@@ -186,27 +175,19 @@ pub(crate) async fn show_password_reset(
     };
 
     let now = now_ts();
-    if let Some(snapshot) = password_reset_snapshot(&record, now) {
+    if record.redeemed_at.is_some() || matches!(query.step.as_deref(), Some("summary")) {
         return page(
             &config.portal_title,
             &password_reset_summary_html(
                 config,
                 &token,
                 &record.user_id,
-                snapshot.password,
-                snapshot.saved_at,
-                snapshot.logout_devices,
+                None,
+                None,
+                record.logout_devices != 0,
             ),
         )
         .into_response();
-    }
-
-    if record.redeemed_at.is_some() {
-        return html_error(
-            StatusCode::GONE,
-            "Reset link already used",
-            "<div class=\"card\"><h1>Reset link already used</h1><p class=\"muted\">This one-time reset link has already been used.</p></div>",
-        );
     }
 
     if record.expires_at <= now {
@@ -251,29 +232,6 @@ pub(crate) async fn redeem_password_reset(
     };
 
     let now = now_ts();
-    if let Some(snapshot) = password_reset_snapshot(&record, now) {
-        return page(
-            &config.portal_title,
-            &password_reset_summary_html(
-                config,
-                &token,
-                &record.user_id,
-                snapshot.password,
-                snapshot.saved_at,
-                snapshot.logout_devices,
-            ),
-        )
-        .into_response();
-    }
-
-    if record.redeemed_at.is_some() {
-        return html_error(
-            StatusCode::GONE,
-            "Reset link already used",
-            "<div class=\"card\"><h1>Reset link already used</h1><p class=\"muted\">This one-time reset link has already been used.</p></div>",
-        );
-    }
-
     if record.expires_at <= now {
         return html_error(
             StatusCode::GONE,
@@ -354,7 +312,6 @@ pub(crate) async fn redeem_password_reset(
         &token_hash,
         saved_at,
         &record.user_id,
-        &form.password,
         logout_devices,
     ) {
         return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string());
@@ -366,8 +323,8 @@ pub(crate) async fn redeem_password_reset(
             config,
             &token,
             &record.user_id,
-            &form.password,
-            saved_at,
+            Some(&form.password),
+            Some(saved_at),
             logout_devices,
         ),
     )
@@ -471,8 +428,8 @@ fn password_reset_summary_html(
     config: &Config,
     token: &str,
     user_id: &str,
-    password: &str,
-    saved_at: i64,
+    password: Option<&str>,
+    saved_at: Option<i64>,
     logout_devices: bool,
 ) -> String {
     let devices_note = if logout_devices {
@@ -480,10 +437,12 @@ fn password_reset_summary_html(
     } else {
         "Existing sessions and devices were left signed in."
     };
+    let password = password.unwrap_or("");
+    let saved_at = saved_at.unwrap_or_default();
 
     format!(
         r#"
-<div class="summary-block" data-summary-token="{}" data-summary-saved-at="{}">
+<div class="summary-block" data-summary-mode="{}" data-summary-key="{}" data-summary-token="{}" data-summary-password="{}" data-summary-saved-at="{}" data-summary-logout-devices="{}">
   <div class="section-title">Your quick checklist</div>
   <ul class="summary-list">
     <li><strong>Matrix ID:</strong> <span>{}</span></li>
@@ -497,34 +456,120 @@ fn password_reset_summary_html(
   <p class="summary-note">Password reset completed.</p>
   <div class="section-title">Apps, help, and clients</div>
   {}
+  {}
 </div>
 "#,
+        encode_minimal(if password.is_empty() { "load" } else { "save" }),
+        encode_minimal(&summary_storage_key(token)),
         encode_minimal(token),
+        encode_minimal(password),
         encode_minimal(&saved_at.to_string()),
+        encode_minimal(if logout_devices { "1" } else { "0" }),
         encode_minimal(user_id),
         encode_minimal(password),
         homeserver_url_host(&config.homeserver_url),
         encode_minimal(&config.homeserver_url),
         encode_minimal(devices_note),
         onboarding_links(config),
+        password_reset_summary_state_script(token),
     )
 }
 
-fn password_reset_snapshot<'a>(
-    record: &'a PasswordResetRecord,
-    now: i64,
-) -> Option<PasswordResetSnapshot<'a>> {
-    let saved_at = record.summary_saved_at?;
-    let password = record.summary_password.as_deref()?;
-    if now - saved_at > RESET_SUMMARY_TTL_SECONDS {
-        return None;
-    }
+fn password_reset_summary_state_script(token: &str) -> String {
+    format!(
+        r#"
+<script>
+  (() => {{
+    const block = document.querySelector('[data-summary-key="{}"]');
+    if (!block) return;
 
-    Some(PasswordResetSnapshot {
-        password,
-        saved_at,
-        logout_devices: record.logout_devices != 0,
-    })
+    const key = block.dataset.summaryKey;
+    const token = block.dataset.summaryToken;
+    const summaryUrl = '/reset/' + token + '?step=summary';
+    const passwordField = block.querySelector('[data-summary-field="password"]');
+    const maxAgeMs = {} * 1000;
+
+    const parseSnapshot = (raw) => {{
+      try {{
+        if (!raw) return null;
+        const state = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (!state || state.token !== token) return null;
+        if (!state.password) return null;
+        return {{
+          token,
+          password: state.password,
+          saved_at: Number(state.saved_at) || Date.now(),
+          logout_devices: Boolean(state.logout_devices),
+        }};
+      }} catch (_) {{
+        return null;
+      }}
+    }};
+
+    const readSnapshot = () => {{
+      const state =
+        parseSnapshot(window.localStorage.getItem(key)) ||
+        parseSnapshot(window.name) ||
+        parseSnapshot(window.history.state && window.history.state.matrixInvitePortalSummary);
+      if (state && Date.now() - state.saved_at <= maxAgeMs) {{
+        return state;
+      }}
+      return null;
+    }};
+
+    const writeState = (data) => {{
+      if (passwordField) passwordField.textContent = data.password || '';
+    }};
+
+    const persistSnapshot = (data) => {{
+      window.localStorage.setItem(key, JSON.stringify(data));
+      window.name = JSON.stringify(data);
+      try {{
+        window.history.replaceState({{ matrixInvitePortalSummary: data }}, '', summaryUrl);
+      }} catch (_) {{}}
+    }};
+
+    const restoreSummary = () => {{
+      const state = readSnapshot();
+      if (!state) return false;
+
+      persistSnapshot(state);
+      writeState(state);
+      return true;
+    }};
+
+    try {{
+      if (block.dataset.summaryMode === 'save') {{
+        const payload = {{
+          token,
+          password: block.dataset.summaryPassword || '',
+          saved_at: Number(block.dataset.summarySavedAt) || Date.now(),
+          logout_devices: block.dataset.summaryLogoutDevices === '1',
+        }};
+        persistSnapshot(payload);
+        writeState(payload);
+      }} else {{
+        restoreSummary();
+      }}
+    }} catch (_) {{
+      return;
+    }}
+
+    window.addEventListener('pageshow', () => {{
+      try {{
+        restoreSummary();
+      }} catch (_) {{}}
+    }});
+  }})();
+</script>
+"#,
+        encode_minimal(token),
+        RESET_SUMMARY_TTL_SECONDS,
+    )
+}
+
+fn summary_storage_key(token: &str) -> String {
+    format!("matrix-invite-portal.password-reset.{}", token)
 }
 
 fn reset_link(config: &Config, token: &str) -> String {
@@ -691,8 +736,6 @@ fn load_password_reset_record(
             expires_at,
             user_id,
             redeemed_at,
-            summary_password,
-            summary_saved_at,
             logout_devices
         FROM password_resets
         WHERE token_hash = ?1
@@ -703,9 +746,7 @@ fn load_password_reset_record(
                 expires_at: row.get(0)?,
                 user_id: row.get(1)?,
                 redeemed_at: row.get(2)?,
-                summary_password: row.get(3)?,
-                summary_saved_at: row.get(4)?,
-                logout_devices: row.get(5)?,
+                logout_devices: row.get(3)?,
             })
         },
     )
@@ -741,7 +782,6 @@ fn finalize_password_reset(
     token_hash: &str,
     saved_at: i64,
     user_id: &str,
-    password: &str,
     logout_devices: bool,
 ) -> Result<(), AppError> {
     conn.execute(
@@ -752,14 +792,12 @@ fn finalize_password_reset(
             claimed_by = NULL,
             redeemed_at = ?2,
             redeemed_by = ?3,
-            summary_password = ?4,
-            summary_saved_at = ?5,
-            logout_devices = ?6,
+            logout_devices = ?4,
             last_failure_reason = NULL,
             last_failure_at = NULL
         WHERE token_hash = ?1
         "#,
-        params![token_hash, saved_at, user_id, password, saved_at, i64::from(logout_devices)],
+        params![token_hash, saved_at, user_id, i64::from(logout_devices)],
     )?;
 
     Ok(())
@@ -788,5 +826,28 @@ fn mark_password_reset_failure(
 }
 
 pub(crate) fn migrate_password_resets_schema(_conn: &Connection) -> Result<(), AppError> {
+    if column_exists(_conn, "password_resets", "summary_password")? {
+        _conn.execute(
+            r#"
+            UPDATE password_resets
+            SET summary_password = NULL,
+                summary_saved_at = NULL
+            "#,
+            [],
+        )?;
+    }
+
     Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, AppError> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
