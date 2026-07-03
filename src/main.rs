@@ -1243,11 +1243,11 @@ fn onboarding_links(config: &Config) -> String {
     format!(
         r#"
 <div class="badge-links">
-  <a href="https://apps.apple.com/app/vector/id1083446067" target="_blank" rel="noreferrer">
-    <img src="{}" alt="Download Element for iOS">
+  <a href="https://apps.apple.com/us/app/element-x-secure-chat-call/id1631335820" target="_blank" rel="noreferrer">
+    <img src="{}" alt="Download Element X for iOS">
   </a>
   <a href="https://play.google.com/store/apps/details?id=im.vector.app" target="_blank" rel="noreferrer">
-    <img src="{}" alt="Download Element for Android">
+    <img src="{}" alt="Download Element X for Android">
   </a>
   <a href="https://f-droid.org/packages/chat.schildi.android/" target="_blank" rel="noreferrer">
     <img src="{}" alt="Get SchildiChat on F-Droid">
@@ -1364,8 +1364,11 @@ async fn show_invite(
             };
 
             if wants_clear {
-                return page(&state.config.portal_title, &clear_summary_state_page(&token))
-                    .into_response();
+                return page(
+                    &state.config.portal_title,
+                    &clear_summary_state_page(&token),
+                )
+                .into_response();
             }
 
             if show_summary || invite_used {
