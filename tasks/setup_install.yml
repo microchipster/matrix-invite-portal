@@ -44,6 +44,9 @@
   become: true
   become_user: "{{ matrix_user_name }}"
   register: matrix_invite_portal_git_pull_results
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_invite_portal_git_pull_results is not failed
   when: "matrix_invite_portal_container_image_self_build | bool"
 
 - name: Ensure Matrix Invite Portal Docker image is built
