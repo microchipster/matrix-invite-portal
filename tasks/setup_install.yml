@@ -18,6 +18,15 @@
     - {path: "{{ matrix_invite_portal_data_path }}", when: true}
   when: "item.when | bool"
 
+- name: Prepare role-scoped Docker cleanup
+  ansible.builtin.include_role:
+    name: custom/matrix-common-after
+    tasks_from: prepare_role_docker_cleanup.yml
+  vars:
+    matrix_role_docker_cleanup_command: "{{ devture_systemd_docker_base_host_command_docker }}"
+    matrix_role_docker_cleanup_image: "{{ matrix_invite_portal_container_image }}"
+    matrix_role_docker_cleanup_container_name: "{{ matrix_invite_portal_container_name }}"
+
 - name: Ensure Matrix Invite Portal source checkout starts clean on self-build
   # This directory is only a disposable git checkout for building the image.
   ansible.builtin.file:
@@ -50,17 +59,27 @@
   when: "matrix_invite_portal_container_image_self_build | bool"
 
 - name: Ensure Matrix Invite Portal Docker image is built
-  community.docker.docker_image:
+  community.docker.docker_image_build:
     name: "{{ matrix_invite_portal_container_image }}"
-    source: build
-    force_source: "{{ matrix_invite_portal_git_pull_results.changed if ansible_version.major > 2 or ansible_version.minor >= 8 else omit }}"
-    force: "{{ omit if ansible_version.major > 2 or ansible_version.minor >= 8 else matrix_invite_portal_git_pull_results.changed }}"
-    build:
-      dockerfile: Dockerfile
-      path: "{{ matrix_invite_portal_container_src_files_path }}"
-      pull: true
+    path: "{{ matrix_invite_portal_container_src_files_path }}"
+    dockerfile: Dockerfile
+    pull: true
+    rebuild: "{{ 'always' if matrix_invite_portal_git_pull_results.changed | bool else 'never' }}"
   register: matrix_invite_portal_container_image_build_result
   when: "matrix_invite_portal_container_image_self_build | bool"
+
+- name: Check if Matrix Invite Portal Docker image exists
+  community.docker.docker_image_info:
+    name: "{{ matrix_invite_portal_container_image }}"
+  register: matrix_invite_portal_container_image_info
+  when: "matrix_invite_portal_container_image_self_build | bool"
+
+- name: Fail if Matrix Invite Portal Docker image does not exist
+  ansible.builtin.fail:
+    msg: "The Matrix Invite Portal Docker image {{ matrix_invite_portal_container_image }} does not exist. Please check build logs."
+  when:
+    - matrix_invite_portal_container_image_self_build | bool
+    - matrix_invite_portal_container_image_info.images | length == 0
 
 - name: Ensure Matrix Invite Portal env file installed
   ansible.builtin.template:
@@ -114,3 +133,17 @@
     enabled: true
     daemon_reload: true
     state: "{{ 'restarted' if matrix_invite_portal_restart_necessary | bool else 'started' }}"
+
+- name: Finish role-scoped Docker cleanup
+  ansible.builtin.include_role:
+    name: custom/matrix-common-after
+    tasks_from: finish_role_docker_cleanup.yml
+  vars:
+    matrix_role_docker_cleanup_command: "{{ devture_systemd_docker_base_host_command_docker }}"
+    matrix_role_docker_cleanup_image: "{{ matrix_invite_portal_container_image }}"
+    matrix_role_docker_cleanup_container_name: "{{ matrix_invite_portal_container_name }}"
+    matrix_role_docker_cleanup_restart_necessary: >-
+      {{
+        (matrix_invite_portal_container_image_pull_result is defined and matrix_invite_portal_container_image_pull_result.changed | bool)
+        or (matrix_invite_portal_container_image_build_result is defined and matrix_invite_portal_container_image_build_result.changed | bool)
+      }}
