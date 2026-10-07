@@ -127,12 +127,17 @@
         or (matrix_invite_portal_container_image_build_result.changed if matrix_invite_portal_container_image_build_result is defined else false)
       }}
 
+# The shared systemd_service_manager role (running near the end of the play)
+# restarts services whose `restart_necessary` flag is set, retrying transient
+# failures. This task only makes sure the service is enabled and running right
+# after installation. The fact computed above is consumed by
+# `devture_systemd_service_manager_services_list_auto` in group_vars.
 - name: Ensure matrix-invite-portal.service enabled and running
   ansible.builtin.service:
     name: "{{ matrix_invite_portal_systemd_service_name }}"
     enabled: true
     daemon_reload: true
-    state: "{{ 'restarted' if matrix_invite_portal_restart_necessary | bool else 'started' }}"
+    state: started
 
 - name: Finish role-scoped Docker cleanup
   ansible.builtin.include_role:
