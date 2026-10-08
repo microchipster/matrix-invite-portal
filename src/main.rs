@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{net::TcpListener, time::timeout};
 
+mod copy;
 mod password_reset;
 
 type HmacSha1 = Hmac<Sha1>;
@@ -250,10 +251,10 @@ impl Config {
             synapse_registration_shared_secret,
             synapse_admin_access_token,
             public_base_url,
-            portal_title: env_or_default("PORTAL_TITLE", "🤝 Join our community on matrix"),
-            portal_success_message: env_or_default("PORTAL_SUCCESS_MESSAGE", "✨ You’re in."),
-            portal_failure_message: env_or_default("PORTAL_FAILURE_MESSAGE", "We could not create the account. Please try again or ask the person who sent you this link."),
-            portal_root_message: env_or_default("PORTAL_ROOT_MESSAGE", "Open the invite link you were sent to continue."),
+            portal_title: env_or_default("PORTAL_TITLE", "🤝 Join our community on Matrix"),
+            portal_success_message: env_or_default("PORTAL_SUCCESS_MESSAGE", "✨ Your Matrix account is ready."),
+            portal_failure_message: env_or_default("PORTAL_FAILURE_MESSAGE", "We could not create your account. Please try again, or ask the person who sent you this link."),
+            portal_root_message: env_or_default("PORTAL_ROOT_MESSAGE", "To create your account, open the private invite link you received."),
             homeserver_url: env::var("HOMESERVER_URL").map_err(|_| AppError::Config("HOMESERVER_URL is required".into()))?,
             info_website_url: env::var("INFO_WEBSITE_URL").map_err(|_| AppError::Config("INFO_WEBSITE_URL is required".into()))?,
         })
@@ -583,7 +584,7 @@ fn html_document(title: &str, body: String) -> String {
 
       function showCopied(originalText) {{
         button.textContent = "Copied";
-        if (status) status.textContent = "Server copied.";
+        if (status) status.textContent = "Copied server address.";
         setTimeout(function () {{
           button.textContent = originalText;
           if (status) status.textContent = "";
@@ -596,10 +597,10 @@ fn html_document(title: &str, body: String) -> String {
         navigator.clipboard.writeText(text).then(function () {{
           showCopied(original);
         }}).catch(function () {{
-          if (status) status.textContent = "Could not copy. Select the server text instead.";
+          if (status) status.textContent = "Could not copy automatically. Select the address and copy it manually.";
         }});
       }} else {{
-        if (status) status.textContent = "Could not copy. Select the server text instead.";
+        if (status) status.textContent = "Could not copy automatically. Select the address and copy it manually.";
       }}
     }});
   </script>
@@ -786,9 +787,9 @@ async fn provision_user_via_synapse_registration_shared_secret(
     let status = response.status();
     let body = response.text().await?;
     if synapse_username_taken(status, &body) {
-        return Err(AppError::Provisioning(format!(
-            "This username is already in use. Please choose a different one."
-        )));
+        return Err(AppError::Provisioning(
+            "This username is already in use. Please choose a different one.".to_string(),
+        ));
     }
 
     Err(AppError::Provisioning(synapse_register_error_message(
@@ -803,11 +804,12 @@ fn data_uri(mime_type: &str, bytes: &[u8]) -> String {
 }
 
 fn invite_form_html(config: &Config, token: &str, notice_html: &str) -> String {
+    let homeserver_display = homeserver_url_host(&config.homeserver_url);
     format!(
         r#"
 <div class="card" data-invite-form-key="{}" data-invite-form-token="{}">
   <h1>{}</h1>
-  <div class="notice info">Registering account on <strong>{}</strong>.</div>
+  {}
   {}
   <form method="post" autocomplete="off">
     <label for="username">Username</label>
@@ -819,60 +821,50 @@ fn invite_form_html(config: &Config, token: &str, notice_html: &str) -> String {
     <label for="confirm_password">Confirm password</label>
     <input id="confirm_password" name="confirm_password" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required>
 
-    <button type="submit">✨ Create account</button>
+    <button type="submit">✨ Create my account</button>
   </form>
-  <div class="section-title">Basics</div>
+  <div class="section-title">{}</div>
   <ul class="client-list">
-    <li><strong>Homeserver:</strong> <a href="{}" target="_blank" rel="noreferrer">{}</a></li>
+    {}
   </ul>
-  <div class="section-title">Apps, help, and clients</div>
   {}
-  <p class="muted small"><a href="/invite/{}">Read the intro again</a></p>
+  <p class="muted small"><a href="/invite/{}">{}</a></p>
 </div>
 {}"#,
         encode_minimal(token),
         encode_minimal(token),
         encode_minimal(&config.portal_title),
-        encode_minimal(&homeserver_url_host(&config.homeserver_url)),
+        copy::registering_notice(&homeserver_display),
         notice_html,
-        encode_minimal(&config.homeserver_url),
-        encode_minimal(&config.homeserver_url),
+        copy::SECTION_HOMESERVER,
+        copy::homeserver_item(
+            &config.homeserver_url,
+            &config.homeserver_url,
+            "enter this in your app"
+        ),
         onboarding_links(config),
         encode_minimal(token),
+        copy::LINK_READ_INTRO_AGAIN,
         draft_state_script(token),
     )
 }
 
-fn onboarding_intro(token: &str, homeserver_url: &str, invite_used: bool) -> String {
+fn onboarding_intro(token: &str, homeserver_url: &str) -> String {
     let homeserver_host = homeserver_url_host(homeserver_url);
-    let used_notice = if invite_used {
-        r#"<div class="notice warning">This invite has already been used. If this is the same browser, your completed summary should still reopen automatically.</div>"#
-    } else {
-        ""
-    };
-    let continue_button = if invite_used {
-        String::new()
-    } else {
-        format!(
-            r#"<div class="actions">
-    <a class="primary" href="/invite/{}?step=form">Continue</a>
-  </div>"#,
-            encode_minimal(token)
-        )
-    };
     format!(
         r#"
 <div class="card">
-  <h1>👀 Before you continue</h1>
-  <p class="muted small">Read this once, then continue to the form.</p>
-  {}
+  <h1>👀 Before you create your account</h1>
+  <p class="muted small">{}</p>
   <ul class="intro-list">
-    <li>🧭 When the app asks, select <strong>Custom account provider</strong> and enter <strong>{}</strong>. Do <strong>not</strong> register with matrix.org.</li>
-    <li>🔑 When the app issues your <strong>Recover Key</strong>, save it somewhere safe. If you lose it, your chat history will be lost.</li>
-    <li>🙅 No name, email, phone number, or real photo are required or recommended. Do not enter them.</li>
-    <li>✅ After signup, you will get a short checklist with your username, password, account provider, clients, and help.</li>
+    <li>🧭 Later, when your Matrix app asks for a server, choose <strong>Custom account provider</strong> and enter <strong>{}</strong>. Do <strong>not</strong> sign up with matrix.org or any other server.</li>
+    <li>{}</li>
+    <li>🙅 You do not need to give your real name, email, phone number, or photo. Keep them out of your username and profile to protect your privacy.</li>
+    <li>✅ After you sign up, this page will show a checklist with your username, password, homeserver, clients, and help links.</li>
   </ul>
-  {}
+  <div class="actions">
+    <a class="primary" href="/invite/{}?step=form">Continue to sign up</a>
+  </div>
 </div>
 <script>
   (() => {{
@@ -933,9 +925,10 @@ fn onboarding_intro(token: &str, homeserver_url: &str, invite_used: bool) -> Str
   }})();
 </script>
 "#,
-        used_notice,
+        copy::read_first("signup form"),
         encode_minimal(&homeserver_host),
-        continue_button,
+        copy::RECOVERY_KEY_INTRO,
+        encode_minimal(token),
         encode_minimal(&summary_storage_key(token)),
         encode_minimal(token),
     )
@@ -949,8 +942,8 @@ fn clear_summary_state_page(token: &str) -> String {
     format!(
         r#"
 <div class="card">
-  <h1>Saved data cleared</h1>
-  <p class="muted small">Returning you to the invite.</p>
+  <h1>Saved signup details cleared</h1>
+  <p class="muted small">Taking you back to your invite page…</p>
 </div>
 <script>
   (() => {{
@@ -990,18 +983,18 @@ fn onboarding_summary(
     format!(
         r#"
 <div class="summary-block" data-summary-mode="{}" data-summary-key="{}" data-summary-token="{}" data-summary-username="{}" data-summary-password="{}" data-summary-saved-at="{}">
-  <div class="section-title">Your quick checklist</div>
+  <div class="section-title">{}</div>
   <ul class="summary-list">
     <li><strong>Username:</strong> <span data-summary-field="username">{}</span></li>
     <li><strong>Password:</strong> <span data-summary-field="password">{}</span></li>
-    <li class="summary-critical"><strong>Recovery key:</strong> save it somewhere safe. If you lose it, encrypted history can be hard to recover.</li>
-    <li class="summary-provider"><strong>Account provider:</strong> <span class="summary-provider-url">{}</span><button type="button" class="summary-copy-button" data-copy-text="{}">📋 Copy</button></li>
-    <li><strong>Clients:</strong> log into as many clients as you want. Any Matrix client works.</li>
-    <li><strong>PII:</strong> keep real names, emails, phone numbers, and other personal info out of usernames and profiles.</li>
+    {}
+    {}
+    {}
+    {}
   </ul>
   <div class="actions summary-actions">
-    <a href="/invite/{}?step=form&fresh=1" data-reset-invite-state>Try another name</a>
-    <a href="/invite/{}?clear=1" data-clear-invite-state>Clear data</a>
+    <a href="/invite/{}?step=form&fresh=1" data-reset-invite-state>Start over</a>
+    <a href="/invite/{}?clear=1" data-clear-invite-state>Clear saved details</a>
   </div>
 </div>
 {}"#,
@@ -1011,10 +1004,13 @@ fn onboarding_summary(
         encode_minimal(username_value),
         encode_minimal(password_value),
         encode_minimal(&saved_at.map(|value| value.to_string()).unwrap_or_default()),
+        copy::CHECKLIST_TITLE,
         encode_minimal(username_value),
         encode_minimal(password_value),
-        homeserver_display,
-        encode_minimal(&config.homeserver_url),
+        copy::RECOVERY_KEY_ITEM,
+        copy::provider_item(&homeserver_display, &config.homeserver_url),
+        copy::CLIENTS_ITEM,
+        copy::PRIVACY_ITEM,
         encode_minimal(token),
         encode_minimal(token),
         onboarding_links(config),
@@ -1246,30 +1242,33 @@ fn onboarding_links(config: &Config) -> String {
   <a href="https://apps.apple.com/us/app/element-x-secure-chat-call/id1631335820" target="_blank" rel="noreferrer">
     <img src="{}" alt="Download Element X for iOS">
   </a>
-  <a href="https://play.google.com/store/apps/details?id=im.vector.app" target="_blank" rel="noreferrer">
+  <a href="https://play.google.com/store/apps/details?id=io.element.android.x" target="_blank" rel="noreferrer">
     <img src="{}" alt="Download Element X for Android">
   </a>
   <a href="https://f-droid.org/packages/chat.schildi.android/" target="_blank" rel="noreferrer">
     <img src="{}" alt="Get SchildiChat on F-Droid">
   </a>
 </div>
-<div class="section-title">Web and Desktop clients:</div>
+<div class="section-title">{}</div>
 <ul class="client-list">
   <li><a class="client-link" href="{}" target="_blank" rel="noreferrer"><span class="label">Element Web</span><span class="url">{}</span></a></li>
   <li><a class="client-link" href="https://matrix.org/ecosystem/clients/element/" target="_blank" rel="noreferrer"><span class="label">Element Desktop</span><span class="url">matrix.org/ecosystem/clients/element/</span></a></li>
-  <li><a class="client-link" href="https://matrix.org/ecosystem/clients/" target="_blank" rel="noreferrer"><span class="label">Other clients</span><span class="url">matrix.org/ecosystem/clients/</span></a></li>
+  <li><a class="client-link" href="https://matrix.org/ecosystem/clients/" target="_blank" rel="noreferrer"><span class="label">More clients</span><span class="url">matrix.org/ecosystem/clients/</span></a></li>
 </ul>
 <div class="actions">
-  <a href="{}" target="_blank" rel="noreferrer">❓ Help &amp; Guide</a>
+  <a href="{}" target="_blank" rel="noreferrer">{}</a>
 </div>
-<p class="muted small footer-note"><a class="matrix-link" href="https://matrix.org/" target="_blank" rel="noreferrer">What is Matrix</a></p>
+<p class="muted small footer-note"><a class="matrix-link" href="https://matrix.org/" target="_blank" rel="noreferrer">{}</a></p>
 "#,
         encode_minimal(&ios_badge),
         encode_minimal(&android_badge),
         encode_minimal(&fdroid_badge),
+        copy::SECTION_APPS,
         encode_minimal(&client_url),
         encode_minimal(client_display),
         encode_minimal(&config.info_website_url),
+        copy::LINK_HELP_GUIDE,
+        copy::LINK_WHAT_IS_MATRIX,
     )
 }
 
@@ -1318,7 +1317,7 @@ async fn root_page(State(state): State<AppState>) -> Html<String> {
             encode_minimal(&state.config.portal_title),
             encode_minimal(&state.config.portal_root_message),
             encode_minimal(
-                "This service creates accounts only after you open a private invite link."
+                "This website only creates accounts for people who were given a private invite link."
             ),
         ),
     )
@@ -1336,28 +1335,30 @@ async fn show_invite(
     match status {
         Ok(Some(invite)) if invite.revoked_at.is_some() => html_error(
             StatusCode::GONE,
-            &state.config.portal_title,
+            copy::INVITE_PAGE_CANCELLED,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">This invite was revoked.</div><p>{}</p></div>"#,
-                encode_minimal(&state.config.portal_title),
+                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p></div>"#,
+                copy::INVITE_PAGE_CANCELLED,
+                copy::NOTICE_INVITE_CANCELLED,
                 encode_minimal(&state.config.portal_failure_message),
             ),
         ),
         Ok(Some(invite)) if invite.expires_at <= now_ts() => html_error(
             StatusCode::GONE,
-            &state.config.portal_title,
+            copy::INVITE_PAGE_EXPIRED,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">This invite expired.</div><p>{}</p></div>"#,
-                encode_minimal(&state.config.portal_title),
+                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p></div>"#,
+                copy::INVITE_PAGE_EXPIRED,
+                copy::NOTICE_INVITE_EXPIRED,
                 encode_minimal(&state.config.portal_failure_message),
             ),
         ),
         Ok(Some(invite)) => {
             let invite_used = invite.use_limit > 0 && invite.use_count >= invite.use_limit;
-            let message = if let Some(reason) = invite.last_failure_reason.as_ref() {
+            let message = if invite.last_failure_at.is_some() {
                 format!(
                     r#"<div class="notice error">{}</div>"#,
-                    encode_minimal(reason)
+                    copy::NOTICE_LAST_ATTEMPT_FAILED
                 )
             } else {
                 String::new()
@@ -1372,6 +1373,14 @@ async fn show_invite(
             }
 
             if show_summary || invite_used {
+                let used_notice = if invite_used {
+                    format!(
+                        r#"<div class="notice info">{}</div>"#,
+                        copy::NOTICE_INVITE_USED_SUMMARY
+                    )
+                } else {
+                    String::new()
+                };
                 page(
                     &state.config.portal_title,
                     &format!(
@@ -1380,10 +1389,12 @@ async fn show_invite(
   <h1>{}</h1>
   <div class="notice success">{}</div>
   {}
+  {}
 </div>
 {}"#,
                         encode_minimal(&state.config.portal_title),
                         encode_minimal(&state.config.portal_success_message),
+                        used_notice,
                         onboarding_summary(&state.config, &token, None, None, None),
                         summary_state_script(&token),
                     ),
@@ -1398,36 +1409,33 @@ async fn show_invite(
             } else {
                 page(
                     &state.config.portal_title,
-                    &onboarding_intro(&token, &state.config.homeserver_url, invite_used),
+                    &onboarding_intro(&token, &state.config.homeserver_url),
                 )
                 .into_response()
             }
         }
         Ok(None) => html_error(
             StatusCode::NOT_FOUND,
-            &state.config.portal_title,
+            copy::INVITE_PAGE_NOT_VALID,
             &format!(
                 r#"<div class="card"><h1>{}</h1><p>{}</p></div>"#,
-                encode_minimal(&state.config.portal_title),
-                encode_minimal("This invite link is invalid, expired, or already used."),
+                copy::INVITE_PAGE_NOT_VALID,
+                copy::NOTICE_INVITE_NOT_FOUND,
             ),
         ),
-        Err(AppError::NotFound(message)) => html_error(
+        Err(AppError::NotFound(_)) => html_error(
             StatusCode::NOT_FOUND,
-            &state.config.portal_title,
+            copy::INVITE_PAGE_NOT_VALID,
             &format!(
                 r#"<div class="card"><h1>{}</h1><p>{}</p></div>"#,
-                encode_minimal(&state.config.portal_title),
-                encode_minimal(&message),
+                copy::INVITE_PAGE_NOT_VALID,
+                copy::NOTICE_INVITE_NOT_FOUND,
             ),
         ),
-        Err(err) => html_error(
+        Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &state.config.portal_title,
-            &format!(
-                r#"<div class="card"><h1>Error</h1><p>{}</p></div>"#,
-                encode_minimal(&err.to_string())
-            ),
+            copy::ERROR_TITLE,
+            copy::ERROR_CARD,
         ),
     }
 }
@@ -1440,12 +1448,13 @@ async fn redeem_invite(
     if let Err(message) = validate_username(&form.username) {
         return html_error(
             StatusCode::BAD_REQUEST,
-            &state.config.portal_title,
+            copy::ACCOUNT_NOT_CREATED_TITLE,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p><a href="/invite/{}">Go back</a></p></div>"#,
-                encode_minimal(&state.config.portal_title),
-                encode_minimal(&message),
+                r#"<div class="card"><h1>{}</h1>{}<p><a href="/invite/{}?step=form">{}</a></p></div>"#,
+                copy::ACCOUNT_NOT_CREATED_TITLE,
+                copy::form_error_notice(&message),
                 encode_minimal(&token),
+                copy::LINK_BACK_TO_FORM,
             ),
         );
     }
@@ -1453,23 +1462,23 @@ async fn redeem_invite(
     if let Err(message) = validate_password(&form.password) {
         return html_error(
             StatusCode::BAD_REQUEST,
-            &state.config.portal_title,
+            copy::ACCOUNT_NOT_CREATED_TITLE,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p><a href="/invite/{}">Go back</a></p></div>"#,
-                encode_minimal(&state.config.portal_title),
-                encode_minimal(&message),
+                r#"<div class="card"><h1>{}</h1>{}<p><a href="/invite/{}?step=form">{}</a></p></div>"#,
+                copy::ACCOUNT_NOT_CREATED_TITLE,
+                copy::form_error_notice(&message),
                 encode_minimal(&token),
+                copy::LINK_BACK_TO_FORM,
             ),
         );
     }
 
     if form.password != form.confirm_password {
-        let message =
-            r#"<div class="notice error form-error" role="alert">⚠️ Passwords do not match.</div>"#;
+        let message = copy::form_error_notice(copy::PASSWORDS_DO_NOT_MATCH);
         return html_error(
             StatusCode::BAD_REQUEST,
             &state.config.portal_title,
-            &invite_form_html(&state.config, &token, message),
+            &invite_form_html(&state.config, &token, &message),
         );
     }
 
@@ -1491,44 +1500,47 @@ async fn redeem_invite(
             ),
         )
         .into_response(),
-        Err(AppError::NotFound(message)) => html_error(
+        Err(AppError::NotFound(_)) => html_error(
             StatusCode::NOT_FOUND,
-            &state.config.portal_title,
+            copy::ACCOUNT_NOT_CREATED_TITLE,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p><p><a href="/">Go home</a></p></div>"#,
-                encode_minimal(&state.config.portal_title),
-                encode_minimal(&message),
+                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p><p><a href="/">{}</a></p></div>"#,
+                copy::ACCOUNT_NOT_CREATED_TITLE,
+                copy::NOTICE_INVITE_NOT_FOUND,
                 encode_minimal(&state.config.portal_failure_message),
+                copy::LINK_GO_TO_START,
             ),
         ),
         Err(AppError::Provisioning(message)) => html_error(
             StatusCode::BAD_GATEWAY,
-            &state.config.portal_title,
+            copy::ACCOUNT_NOT_CREATED_TITLE,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p><p><a href="/invite/{}">Try again</a></p></div>"#,
-                encode_minimal(&state.config.portal_title),
+                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p><p><a href="/invite/{}?step=form">{}</a></p></div>"#,
+                copy::ACCOUNT_NOT_CREATED_TITLE,
                 encode_minimal(&message),
                 encode_minimal(&state.config.portal_failure_message),
                 encode_minimal(&token),
+                copy::LINK_TRY_AGAIN,
             ),
         ),
         Err(AppError::Timeout) => html_error(
             StatusCode::GATEWAY_TIMEOUT,
-            &state.config.portal_title,
+            copy::ACCOUNT_NOT_CREATED_TITLE,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">Provisioning timed out.</div><p>{}</p><p><a href="/invite/{}">Try again</a></p></div>"#,
-                encode_minimal(&state.config.portal_title),
+                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p><p><a href="/invite/{}?step=form">{}</a></p></div>"#,
+                copy::ACCOUNT_NOT_CREATED_TITLE,
+                copy::NOTICE_ACCOUNT_CREATION_TIMED_OUT,
                 encode_minimal(&state.config.portal_failure_message),
                 encode_minimal(&token),
+                copy::LINK_TRY_AGAIN,
             ),
         ),
-        Err(err) => html_error(
+        Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &state.config.portal_title,
+            copy::ERROR_TITLE,
             &format!(
-                r#"<div class="card"><h1>{}</h1><div class="notice error">{}</div><p>{}</p></div>"#,
-                encode_minimal(&state.config.portal_title),
-                encode_minimal(&err.to_string()),
+                r#"<div class="card"><h1>{}</h1><p>{}</p></div>"#,
+                copy::ERROR_TITLE,
                 encode_minimal(&state.config.portal_failure_message),
             ),
         ),
@@ -1890,15 +1902,13 @@ fn rotate_invite_record(
 
     let (_old_token_hash, expires_at, use_limit, use_count, revoked_at) = existing;
     if revoked_at.is_some() {
-        return Err(AppError::Provisioning("This invite was revoked.".into()));
+        return Err(AppError::Provisioning(copy::NOTICE_INVITE_CANCELLED.into()));
     }
     if expires_at <= now {
-        return Err(AppError::Provisioning("This invite expired.".into()));
+        return Err(AppError::Provisioning(copy::NOTICE_INVITE_EXPIRED.into()));
     }
     if use_limit > 0 && use_count >= use_limit {
-        return Err(AppError::Provisioning(
-            "This invite has already been used.".into(),
-        ));
+        return Err(AppError::Provisioning(copy::NOTICE_INVITE_USED.into()));
     }
 
     conn.execute(
@@ -1982,27 +1992,23 @@ async fn redeem_token(
             claimed_until_existing,
         )) = invite
         else {
-            return Err(AppError::NotFound("Invite link not found.".into()));
+            return Err(AppError::NotFound(copy::NOTICE_INVITE_NOT_FOUND.into()));
         };
 
         if revoked_at.is_some() {
-            return Err(AppError::Provisioning("This invite was revoked.".into()));
+            return Err(AppError::Provisioning(copy::NOTICE_INVITE_CANCELLED.into()));
         }
 
         if expires_at <= now {
-            return Err(AppError::Provisioning("This invite expired.".into()));
+            return Err(AppError::Provisioning(copy::NOTICE_INVITE_EXPIRED.into()));
         }
 
         if use_limit > 0 && use_count >= use_limit {
-            return Err(AppError::Provisioning(
-                "This invite has already been used.".into(),
-            ));
+            return Err(AppError::Provisioning(copy::NOTICE_INVITE_USED.into()));
         }
 
         if claimed_at.is_some() && claimed_until_existing.unwrap_or_default() > now {
-            return Err(AppError::Provisioning(
-                "This invite is being used right now. Please try again in a moment.".into(),
-            ));
+            return Err(AppError::Provisioning(copy::NOTICE_INVITE_BUSY.into()));
         }
 
         tx.execute(

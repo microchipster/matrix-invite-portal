@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use crate::{
-    encode_minimal, generate_token, hash_token, homeserver_url_host, html_error, json_error,
+    copy, encode_minimal, generate_token, hash_token, homeserver_url_host, html_error, json_error,
     now_ts, onboarding_links, open_connection, page, token_preview, validate_password, AppError,
     AppState, Config,
 };
@@ -158,7 +158,13 @@ pub(crate) async fn show_password_reset(
     let config = &state.config;
     let conn = match open_connection(&config.database_path) {
         Ok(conn) => conn,
-        Err(err) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string()),
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                copy::ERROR_TITLE,
+                copy::ERROR_CARD,
+            )
+        }
     };
 
     let token_hash = hash_token(&token);
@@ -168,10 +174,16 @@ pub(crate) async fn show_password_reset(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "Reset link not found",
-                "<div class=\"card\"><h1>Reset link not found</h1><p class=\"muted\">That password reset link does not exist or was removed.</p></div>",
+                copy::RESET_NOT_FOUND_CARD,
             )
         }
-        Err(err) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string()),
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                copy::ERROR_TITLE,
+                copy::ERROR_CARD,
+            )
+        }
     };
 
     let now = now_ts();
@@ -194,7 +206,7 @@ pub(crate) async fn show_password_reset(
         return html_error(
             StatusCode::GONE,
             "Reset link expired",
-            "<div class=\"card\"><h1>Reset link expired</h1><p class=\"muted\">This password reset link has expired.</p></div>",
+            copy::RESET_EXPIRED_CARD,
         );
     }
 
@@ -215,7 +227,13 @@ pub(crate) async fn redeem_password_reset(
     let config = &state.config;
     let conn = match open_connection(&config.database_path) {
         Ok(conn) => conn,
-        Err(err) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string()),
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                copy::ERROR_TITLE,
+                copy::ERROR_CARD,
+            )
+        }
     };
 
     let token_hash = hash_token(&token);
@@ -225,10 +243,16 @@ pub(crate) async fn redeem_password_reset(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "Reset link not found",
-                "<div class=\"card\"><h1>Reset link not found</h1><p class=\"muted\">That password reset link does not exist or was removed.</p></div>",
+                copy::RESET_NOT_FOUND_CARD,
             )
         }
-        Err(err) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string()),
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                copy::ERROR_TITLE,
+                copy::ERROR_CARD,
+            )
+        }
     };
 
     let now = now_ts();
@@ -236,18 +260,19 @@ pub(crate) async fn redeem_password_reset(
         return html_error(
             StatusCode::GONE,
             "Reset link expired",
-            "<div class=\"card\"><h1>Reset link expired</h1><p class=\"muted\">This password reset link has expired.</p></div>",
+            copy::RESET_EXPIRED_CARD,
         );
     }
 
     if form.password != form.confirm_password {
+        let message = copy::form_error_notice(copy::PASSWORDS_DO_NOT_MATCH);
         return page(
             &config.portal_title,
             &password_reset_form_html(
                 config,
                 &token,
                 &record.user_id,
-                Some("<div class=\"notice form-error\">Passwords do not match.</div>"),
+                Some(&message),
                 form.logout_devices.is_some(),
             ),
         )
@@ -255,13 +280,14 @@ pub(crate) async fn redeem_password_reset(
     }
 
     if let Err(message) = validate_password(&form.password) {
+        let notice = copy::form_error_notice(&message);
         return page(
             &config.portal_title,
             &password_reset_form_html(
                 config,
                 &token,
                 &record.user_id,
-                Some(&format!("<div class=\"notice form-error\">{}</div>", encode_minimal(&message))),
+                Some(&notice),
                 form.logout_devices.is_some(),
             ),
         )
@@ -280,29 +306,27 @@ pub(crate) async fn redeem_password_reset(
             return html_error(
                 StatusCode::CONFLICT,
                 "Reset link busy",
-                "<div class=\"card\"><h1>Reset link busy</h1><p class=\"muted\">This reset link is already being used. Try again in a moment.</p></div>",
+                copy::RESET_BUSY_CARD,
             );
         }
-        Err(err) => return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string()),
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                copy::ERROR_TITLE,
+                copy::ERROR_CARD,
+            )
+        }
     }
 
     let logout_devices = form.logout_devices.is_some();
-    if let Err(err) = synapse_reset_password(
-        config,
-        &record.user_id,
-        &form.password,
-        logout_devices,
-    )
-    .await
+    if let Err(err) =
+        synapse_reset_password(config, &record.user_id, &form.password, logout_devices).await
     {
         let _ = mark_password_reset_failure(&conn, &token_hash, now, &err.to_string());
         return html_error(
             StatusCode::BAD_GATEWAY,
             "Password reset failed",
-            &format!(
-                "<div class=\"card\"><h1>Password reset failed</h1><p class=\"muted\">{}</p></div>",
-                encode_minimal(&err.to_string())
-            ),
+            copy::RESET_FAILED_CARD,
         );
     }
 
@@ -314,7 +338,12 @@ pub(crate) async fn redeem_password_reset(
         &record.user_id,
         logout_devices,
     ) {
-        return html_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error", &err.to_string());
+        let _ = mark_password_reset_failure(&conn, &token_hash, saved_at, &err.to_string());
+        return html_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            copy::ERROR_TITLE,
+            copy::ERROR_CARD,
+        );
     }
 
     page(
@@ -359,20 +388,21 @@ fn password_reset_intro_html(_config: &Config, token: &str, user_id: &str) -> St
         r#"
 <div class="card">
   <h1>🔐 Reset your password</h1>
-  <p class="muted small">Read this first, then continue to the password form.</p>
-  <div class="notice info">Resetting password for <strong>{}</strong>.</div>
+  <p class="muted small">{}</p>
+  {}
   <ul class="intro-list">
-    <li>🔑 You will set a new password on the next page. Type it twice so we can catch mistakes.</li>
-    <li>🧹 If you want, you can log out your old devices after the password change.</li>
-    <li>🧭 The client, help, and Matrix basics links below are there in case you are re-learning the ecosystem.</li>
-    <li>✅ After the reset, you will get a short checklist with your account, password, and the important links again.</li>
+    <li>🔑 On the next page, choose a new password. You will type it twice to catch typos.</li>
+    <li>🧹 On the next page, you can also log out your other sessions and devices.</li>
+    <li>🧭 The next page has client, help, and Matrix basics links in case you need them.</li>
+    <li>✅ After the reset, this page will show a checklist with your Matrix ID, new password, and useful links.</li>
   </ul>
   <div class="actions">
-    <a class="primary" href="/reset/{}?step=form">Continue</a>
+    <a class="primary" href="/reset/{}?step=form">Continue to password form</a>
   </div>
 </div>
 "#,
-        encode_minimal(user_id),
+        copy::read_first("password form"),
+        copy::resetting_password_notice(user_id),
         encode_minimal(token),
     )
 }
@@ -384,12 +414,16 @@ fn password_reset_form_html(
     notice_html: Option<&str>,
     logout_devices_checked: bool,
 ) -> String {
-    let checked = if logout_devices_checked { " checked" } else { "" };
+    let checked = if logout_devices_checked {
+        " checked"
+    } else {
+        ""
+    };
     format!(
         r#"
 <div class="card">
-  <h1>Reset password</h1>
-  <div class="notice info">Resetting password for <strong>{}</strong>.</div>
+  <h1>Reset your password</h1>
+  {}
   {}
   <form method="post" autocomplete="off">
     <label for="password">New password</label>
@@ -400,27 +434,31 @@ fn password_reset_form_html(
 
     <div class="check-row">
       <input id="logout_devices" name="logout_devices" type="checkbox" value="1"{}>
-      <label for="logout_devices">Log out existing sessions and devices after changing the password</label>
+      <label for="logout_devices">Log out all other sessions and devices after the password is changed</label>
     </div>
 
-    <button type="submit">🔄 Change password</button>
+    <button type="submit">🔄 Save new password</button>
   </form>
-  <div class="section-title">Basics</div>
+  <div class="section-title">{}</div>
   <ul class="client-list">
-    <li><strong>Homeserver:</strong> <a href="{}" target="_blank" rel="noreferrer">{}</a></li>
+    {}
   </ul>
-  <div class="section-title">Apps, help, and clients</div>
   {}
-  <p class="muted small"><a href="/reset/{}">Read the intro again</a></p>
+  <p class="muted small"><a href="/reset/{}">{}</a></p>
 </div>
 "#,
-        encode_minimal(user_id),
+        copy::resetting_password_notice(user_id),
         notice_html.unwrap_or(""),
         checked,
-        encode_minimal(&config.homeserver_url),
-        encode_minimal(&homeserver_url_host(&config.homeserver_url)),
+        copy::SECTION_HOMESERVER,
+        copy::homeserver_item(
+            &config.homeserver_url,
+            &homeserver_url_host(&config.homeserver_url),
+            "for signing in"
+        ),
         onboarding_links(config),
         encode_minimal(token),
+        copy::LINK_READ_INTRO_AGAIN,
     )
 }
 
@@ -433,9 +471,9 @@ fn password_reset_summary_html(
     logout_devices: bool,
 ) -> String {
     let devices_note = if logout_devices {
-        "Existing sessions and devices were logged out after the password change."
+        "All other sessions and devices were logged out when your password changed."
     } else {
-        "Existing sessions and devices were left signed in."
+        "Your other sessions and devices are still signed in."
     };
     let password = password.unwrap_or("");
     let saved_at = saved_at.unwrap_or_default();
@@ -443,18 +481,17 @@ fn password_reset_summary_html(
     format!(
         r#"
 <div class="summary-block" data-summary-mode="{}" data-summary-key="{}" data-summary-token="{}" data-summary-password="{}" data-summary-saved-at="{}" data-summary-logout-devices="{}">
-  <div class="section-title">Your quick checklist</div>
+  <div class="section-title">{}</div>
   <ul class="summary-list">
     <li><strong>Matrix ID:</strong> <span>{}</span></li>
-    <li><strong>Password:</strong> <span>{}</span></li>
-    <li class="summary-critical"><strong>Recovery key:</strong> save it somewhere safe. If you lose it, encrypted history can be hard to recover.</li>
-    <li class="summary-provider"><strong>Account provider:</strong> <span class="summary-provider-url">{}</span><button type="button" class="summary-copy-button" data-copy-text="{}">📋 Copy</button></li>
+    <li><strong>Password:</strong> <span data-summary-field="password">{}</span></li>
+    {}
+    {}
     <li><strong>Sessions:</strong> {}</li>
-    <li><strong>Clients:</strong> log into as many clients as you want. Any Matrix client works.</li>
-    <li><strong>PII:</strong> keep real names, emails, phone numbers, and other personal info out of usernames and profiles.</li>
+    {}
+    {}
   </ul>
-  <p class="summary-note">Password reset completed.</p>
-  <div class="section-title">Apps, help, and clients</div>
+  <p class="summary-note">✅ Your password has been reset.</p>
   {}
   {}
 </div>
@@ -465,11 +502,17 @@ fn password_reset_summary_html(
         encode_minimal(password),
         encode_minimal(&saved_at.to_string()),
         encode_minimal(if logout_devices { "1" } else { "0" }),
+        copy::CHECKLIST_TITLE,
         encode_minimal(user_id),
         encode_minimal(password),
-        homeserver_url_host(&config.homeserver_url),
-        encode_minimal(&config.homeserver_url),
+        copy::RECOVERY_KEY_ITEM,
+        copy::provider_item(
+            &homeserver_url_host(&config.homeserver_url),
+            &config.homeserver_url
+        ),
         encode_minimal(devices_note),
+        copy::CLIENTS_ITEM,
+        copy::PRIVACY_ITEM,
         onboarding_links(config),
         password_reset_summary_state_script(token),
     )
@@ -692,10 +735,9 @@ async fn synapse_reset_password(
     new_password: &str,
     logout_devices: bool,
 ) -> Result<(), AppError> {
-    let access_token = config
-        .synapse_admin_access_token
-        .as_ref()
-        .ok_or_else(|| AppError::Config("SYNAPSE_ADMIN_ACCESS_TOKEN is required for password resets".into()))?;
+    let access_token = config.synapse_admin_access_token.as_ref().ok_or_else(|| {
+        AppError::Config("SYNAPSE_ADMIN_ACCESS_TOKEN is required for password resets".into())
+    })?;
     let client = Client::new();
     let url = synapse_reset_password_url(&config.synapse_admin_api_base_url, user_id);
     let request = client
