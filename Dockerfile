@@ -9,7 +9,7 @@ RUN cargo build --release
 
 FROM alpine:3.20
 
-RUN apk add --no-cache bash ca-certificates docker-cli
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY --from=builder /src/target/release/matrix-invite-portal /usr/local/bin/matrix-invite-portal

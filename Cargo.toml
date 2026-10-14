@@ -19,3 +19,7 @@ sha1 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 hex = "0.4"
+
+[profile.release]
+strip = true
+lto = "thin"
